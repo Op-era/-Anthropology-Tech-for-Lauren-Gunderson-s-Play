@@ -1,0 +1,8 @@
+{
+  "name": "Anthropology",
+  "description": "An interactive script-following application that listens for actor cues and responds with lines, camera feeds, and pre-recorded videos, creating an immersive rehearsal and performance experience.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
