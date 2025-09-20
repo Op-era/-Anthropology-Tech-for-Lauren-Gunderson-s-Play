@@ -64,6 +64,16 @@ const App: React.FC = () => {
     const [videos, setVideos] = useState<VideoFile[]>([]);
     const [audioFiles, setAudioFiles] = useState<AudioFile[]>([]);
     const [scriptFile, setScriptFile] = useState<File | null>(null);
+    const [currentLineIndex, setCurrentLineIndex] = useState(0);
+
+    const advanceLine = useCallback(() => {
+        setCurrentLineIndex(prev => {
+            if (prev + 1 >= script.length) {
+                return prev;
+            }
+            return prev + 1;
+        });
+    }, [script.length]);
 
     const {
         scenes,
@@ -72,25 +82,18 @@ const App: React.FC = () => {
         displayedAngieLine,
         userCueLine,
         isComputerSpeaking,
-        advanceLine,
         jumpToScene,
         onTypingComplete,
         onDialogueVideoEnd,
-    } = usePerformanceManager(script, audioFiles, status);
-
-    const performanceStateRef = useRef({ userCueLine, advanceLine });
-    useEffect(() => {
-        performanceStateRef.current = { userCueLine, advanceLine };
-    }, [userCueLine, advanceLine]);
+    } = usePerformanceManager(script, audioFiles, currentLineIndex, status, advanceLine);
 
     const handleSpeechResult = useCallback((spokenText: string) => {
-        const { userCueLine: currentCue, advanceLine: currentAdvance } = performanceStateRef.current;
-        if (currentCue && fuzzyMatch(currentCue, spokenText)) {
-            currentAdvance();
+        if (userCueLine && fuzzyMatch(userCueLine, spokenText)) {
+            advanceLine();
         }
-    }, []);
+    }, [userCueLine, advanceLine]);
 
-    const { transcript, start: startListening, stop: stopListening } = useSpeechRecognition({ onResult: handleSpeechResult });
+    const { transcript, start: startListening, stop: stopListening, clearTranscript, permissionStatus } = useSpeechRecognition({ onResult: handleSpeechResult });
     
     useEffect(() => {
         const loadStoredData = async () => {
@@ -120,18 +123,20 @@ const App: React.FC = () => {
         loadStoredData();
     }, []);
 
+    // Main effect to control listening state based on the performance state.
     useEffect(() => {
-        if (status === AppStatus.PERFORMING) {
-            if (!isComputerSpeaking && userCueLine) {
-                startListening();
-            } else {
-                stopListening();
-            }
+        const isPerforming = status === AppStatus.PERFORMING;
+        const shouldBeListening = isPerforming && !!userCueLine && !isComputerSpeaking;
+
+        if (shouldBeListening && permissionStatus === 'granted') {
+            clearTranscript();
+            startListening();
         } else {
             stopListening();
         }
-    }, [status, isComputerSpeaking, userCueLine, startListening, stopListening]);
+    }, [status, userCueLine, isComputerSpeaking, permissionStatus, startListening, stopListening, clearTranscript]);
     
+    // Effect for handling keyboard controls.
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.code !== 'Space') return;
@@ -141,18 +146,28 @@ const App: React.FC = () => {
                 if (!isMenuOpen) setIsMenuOpen(true);
                 return;
             }
-
+            
             if (status === AppStatus.TITLE_SCREEN) {
                 setStatus(AppStatus.TRANSITION_SCREEN);
-            } else if (status === AppStatus.TRANSITION_SCREEN) {
-                setStatus(AppStatus.PERFORMING);
+                // Give time for transition screen to show
+                setTimeout(() => setStatus(AppStatus.PERFORMING), 3000);
             } else if (status === AppStatus.PERFORMING) {
-                advanceLine();
+                // Allow spacebar to advance only on user's turn
+                if (userCueLine) {
+                    advanceLine();
+                }
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [status, advanceLine, script.length, isMenuOpen]);
+    }, [status, advanceLine, script.length, isMenuOpen, userCueLine]);
+
+    const handleJumpToScene = (index: number) => {
+      jumpToScene(index);
+      setCurrentLineIndex(index);
+      setIsMenuOpen(false);
+      setStatus(AppStatus.PERFORMING);
+    };
 
     const handleNewScript = (file: File) => {
         const reader = new FileReader();
@@ -162,8 +177,8 @@ const App: React.FC = () => {
             const parsed = parseScript(newScriptText);
             setScript(parsed);
             setScriptFile(file);
+            setCurrentLineIndex(0);
             setStatus(AppStatus.TITLE_SCREEN);
-            jumpToScene(0);
         };
         reader.readAsText(file);
     };
@@ -177,8 +192,8 @@ const App: React.FC = () => {
             url: URL.createObjectURL(file)
         }));
         setVideos(videoObjects);
+        setCurrentLineIndex(0);
         setStatus(AppStatus.TITLE_SCREEN);
-        jumpToScene(0);
     };
 
     const handleNewAudio = async (files: FileList) => {
@@ -190,31 +205,65 @@ const App: React.FC = () => {
             url: URL.createObjectURL(file)
         }));
         setAudioFiles(audioObjects);
+        setCurrentLineIndex(0);
         setStatus(AppStatus.TITLE_SCREEN);
-        jumpToScene(0);
     };
 
     const handleClearData = async () => {
         await storage.clearAllData();
         window.location.reload();
     };
+    
+    const handleGrantPermission = () => {
+        // This direct user action is required by the browser to show the prompt.
+        // The speech recognition hook handles the underlying API calls.
+        startListening();
+    };
 
     const renderContent = () => {
+        if (status === AppStatus.PERFORMING && permissionStatus === 'prompt') {
+            return (
+                <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center text-center z-50 p-8">
+                    <h2 className="font-title text-5xl text-teal-400 mb-4">Enable Your Microphone</h2>
+                    <p className="text-2xl max-w-3xl mb-8">This application needs permission to listen for your lines.</p>
+                    <button
+                        onClick={handleGrantPermission}
+                        className="font-title text-3xl bg-teal-500 hover:bg-teal-400 text-black px-8 py-4 rounded-lg transition-colors focus:outline-none focus:ring-4 focus:ring-teal-300"
+                    >
+                        Activate Microphone
+                    </button>
+                    <p className="text-xl max-w-3xl mt-6 text-gray-400">Your browser will ask you to confirm. Please click "Allow".</p>
+                </div>
+            );
+        }
+
+        if (status === AppStatus.PERFORMING && permissionStatus === 'denied') {
+            return (
+                 <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center text-center z-50 p-8">
+                    <h2 className="font-title text-5xl text-red-500 mb-4">Microphone Access Denied</h2>
+                    <p className="text-2xl max-w-3xl">This application requires access to your microphone to listen for your lines.</p>
+                    <p className="text-xl max-w-3xl mt-4 text-gray-400">To fix this, please go to your browser's site settings for this page, enable microphone permissions, and then reload.</p>
+                </div>
+            )
+        }
+
         switch (status) {
             case AppStatus.TITLE_SCREEN:
                 return <div className="flex items-center justify-center h-screen"><h1 className="font-title text-9xl animate-pulse">ANTHROPOLOGY</h1></div>;
             case AppStatus.TRANSITION_SCREEN:
                 return <CodeTransitionScreen />;
             case AppStatus.PERFORMING:
-                return <PerformanceView 
-                    mode={viewMode}
-                    angieLine={displayedAngieLine}
-                    userTranscript={transcript}
-                    videos={videos}
-                    videoState={videoState}
-                    onDialogueVideoEnd={onDialogueVideoEnd}
-                    onTypingComplete={onTypingComplete}
-                />;
+                return (
+                    <PerformanceView 
+                        mode={viewMode}
+                        angieLine={displayedAngieLine}
+                        userTranscript={transcript}
+                        videos={videos}
+                        videoState={videoState}
+                        onDialogueVideoEnd={onDialogueVideoEnd}
+                        onTypingComplete={onTypingComplete}
+                    />
+                );
             default:
                 return <div className="flex items-center justify-center h-screen"><p className="text-red-500">An unexpected error occurred.</p></div>;
         }
@@ -229,11 +278,7 @@ const App: React.FC = () => {
                 isOpen={isMenuOpen}
                 onClose={() => setIsMenuOpen(false)}
                 scenes={scenes}
-                onSelectScene={(index) => {
-                    jumpToScene(index);
-                    setIsMenuOpen(false);
-                    setStatus(AppStatus.PERFORMING);
-                }}
+                onSelectScene={handleJumpToScene}
                 scriptName={scriptFile?.name || null}
                 videoCount={videos.length}
                 audioCount={audioFiles.length}

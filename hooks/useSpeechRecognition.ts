@@ -51,103 +51,89 @@ const SpeechRecognition: SpeechRecognitionConstructor | undefined =
 export const useSpeechRecognition = ({ onResult }: SpeechRecognitionOptions) => {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const [permissionStatus, setPermissionStatus] = useState<'prompt' | 'granted' | 'denied'>('prompt');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const stoppedManually = useRef(false);
   const onResultRef = useRef(onResult);
-  const retryTimeoutRef = useRef<number | null>(null);
-  const retryCountRef = useRef(0);
   
   useEffect(() => {
     onResultRef.current = onResult;
   }, [onResult]);
 
-  const start = useCallback(() => {
-    if (recognitionRef.current) {
-      stoppedManually.current = false;
-      setTranscript('');
-      try {
-        recognitionRef.current.start();
-      } catch (error) {
-         if (error instanceof DOMException && error.name === 'InvalidStateError') {
-            // Already running, which is the desired state. Ignore.
-         } else {
-            console.error("Error starting speech recognition:", error);
-         }
-      }
-    }
+  const clearTranscript = useCallback(() => {
+    setTranscript('');
   }, []);
 
-  const stop = useCallback(() => {
-    if (recognitionRef.current) {
-      stoppedManually.current = true;
-       if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-        retryTimeoutRef.current = null;
-      }
-      recognitionRef.current.stop();
+  const startListening = useCallback(() => {
+    if (isListening || !recognitionRef.current) {
+      return;
     }
-  }, []);
+    try {
+      recognitionRef.current.start();
+    } catch (error) {
+       // This can happen if it's already starting, which is fine.
+       if (error instanceof DOMException && error.name === 'InvalidStateError') {
+          console.warn("Speech recognition already starting.");
+       } else {
+          console.error("Error starting speech recognition:", error);
+       }
+    }
+  }, [isListening]);
+
+  const stopListening = useCallback(() => {
+    if (!isListening || !recognitionRef.current) {
+      return;
+    }
+    recognitionRef.current.stop();
+  }, [isListening]);
 
 
   useEffect(() => {
+    // Check initial permission status if the API is available
+    if (navigator.permissions) {
+      navigator.permissions.query({ name: 'microphone' } as any).then((status) => {
+        setPermissionStatus(status.state);
+        status.onchange = () => {
+          setPermissionStatus(status.state);
+        };
+      });
+    }
+
     if (!SpeechRecognition) {
       console.error('Speech Recognition API not supported in this browser.');
       return;
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
+    recognitionRef.current = recognition;
+    
+    recognition.continuous = false; // Important for turn-based interaction
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     recognition.onstart = () => {
       setIsListening(true);
-      stoppedManually.current = false;
-      retryCountRef.current = 0; // Reset on successful start
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-        retryTimeoutRef.current = null;
-      }
+      // If recognition starts, it implies permission has been granted at some point.
+      setPermissionStatus('granted');
     };
 
     recognition.onend = () => {
       setIsListening(false);
-      if (!stoppedManually.current && !retryTimeoutRef.current) {
-        // Not a manual stop, and not in a retry loop for a specific error.
-        // This is likely a 'no-speech' timeout. Restart quickly.
-        setTimeout(() => {
-          if (!stoppedManually.current) start();
-        }, 100);
-      }
+      // The parent component is now solely responsible for restarting.
     };
 
     recognition.onerror = (event) => {
-      if (event.error === 'no-speech') {
-        // This is a common timeout event, not a critical error.
-        // The onend handler will restart the recognition, so we can just return.
+      if (event.error === 'no-speech' || event.error === 'aborted') {
+        // These are not critical errors. `onend` will fire next.
         return;
       }
       
-      console.error('Speech recognition error:', event.error);
-      setIsListening(false);
-
-      // Handle network-related errors with exponential backoff
-      if (['network', 'service-not-allowed'].includes(event.error)) {
-        if (retryTimeoutRef.current) {
-          clearTimeout(retryTimeoutRef.current);
-        }
-
-        const retryDelay = Math.min(30000, Math.pow(2, retryCountRef.current) * 1000); // 1s, 2s, 4s... up to 30s
-        console.log(`Retrying speech recognition due to '${event.error}' in ${retryDelay / 1000} seconds...`);
-
-        retryTimeoutRef.current = window.setTimeout(() => {
-          retryTimeoutRef.current = null;
-          if (!stoppedManually.current) {
-              retryCountRef.current++;
-              start();
-          }
-        }, retryDelay);
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        console.error('Speech recognition permission denied.');
+        setPermissionStatus('denied');
+      } else {
+        console.error('Speech recognition error:', event.error);
       }
+      setIsListening(false);
     };
 
     recognition.onresult = (event) => {
@@ -158,22 +144,34 @@ export const useSpeechRecognition = ({ onResult }: SpeechRecognitionOptions) => 
 
       setTranscript(fullTranscript);
 
+      // Check if the final result for this utterance has been received.
       const lastResult = event.results[event.results.length - 1];
       if (lastResult.isFinal) {
         onResultRef.current(fullTranscript.trim());
+        // Since continuous is false, recognition will stop automatically.
+        // The onend event will fire, and the parent component's useEffect
+        // will decide if it needs to start listening for the next cue.
       }
     };
-
-    recognitionRef.current = recognition;
 
     return () => {
-      stoppedManually.current = true;
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onresult = null;
       }
-      recognition.stop();
     };
-  }, [start]);
+  }, []);
 
-  return { isListening, transcript, start, stop, supported: !!SpeechRecognition };
+  return { 
+    isListening, 
+    transcript, 
+    start: startListening, 
+    stop: stopListening, 
+    clearTranscript, 
+    supported: !!SpeechRecognition, 
+    permissionStatus 
+  };
 };

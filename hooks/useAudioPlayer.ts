@@ -4,7 +4,7 @@ export const useAudioPlayer = () => {
     const [isPlaying, setIsPlaying] = useState(false);
     const audioRef = useRef<HTMLAudioElement | null>(null);
 
-    const play = useCallback((url: string) => {
+    const play = useCallback((url: string, onEnd?: () => void) => {
         if (!url) return;
 
         // Stop any currently playing audio
@@ -17,7 +17,10 @@ export const useAudioPlayer = () => {
         audioRef.current = newAudio;
         
         newAudio.onplay = () => setIsPlaying(true);
-        newAudio.onended = () => setIsPlaying(false);
+        newAudio.onended = () => {
+            setIsPlaying(false);
+            if (onEnd) onEnd();
+        };
         newAudio.onpause = () => setIsPlaying(false);
         newAudio.onabort = () => setIsPlaying(false);
         

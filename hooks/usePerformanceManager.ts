@@ -3,8 +3,13 @@ import { ScriptLine, LineType, Scene, ViewMode, PrerecordedVideoState, CueType, 
 import { COMPUTER_CHARACTER } from '../services/scriptParser';
 import { useAudioPlayer } from './useAudioPlayer';
 
-export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFile[], status: AppStatus) => {
-    const [currentLineIndex, setCurrentLineIndex] = useState(0);
+export const usePerformanceManager = (
+    script: ScriptLine[], 
+    audioFiles: AudioFile[], 
+    currentLineIndex: number,
+    status: AppStatus,
+    onComputerLineComplete: () => void,
+) => {
     const [isTyping, setIsTyping] = useState(false);
     const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.TEXT);
     const [videoState, setVideoState] = useState({
@@ -12,12 +17,15 @@ export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFil
         dialogueIndex: -1
     });
     const [displayedAngieLine, setDisplayedAngieLine] = useState<string | null>(null);
-    const wasComputerSpeakingRef = useRef(false);
     const angieLineCounterRef = useRef(0);
     
     const { play: playAudio, cancel: cancelAudio, isPlaying: isAudioPlaying } = useAudioPlayer();
 
-    // The computer is considered "speaking" if either the text is typing or the audio is playing.
+    const onComputerLineCompleteRef = useRef(onComputerLineComplete);
+    useEffect(() => {
+        onComputerLineCompleteRef.current = onComputerLineComplete;
+    }, [onComputerLineComplete]);
+
     const isComputerSpeaking = isTyping || isAudioPlaying;
 
     const scenes = useMemo(() => script.reduce((acc, line, index) => {
@@ -31,19 +39,8 @@ export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFil
     const isUsersTurn = currentLine?.type === LineType.DIALOGUE && currentLine.character !== COMPUTER_CHARACTER;
     const userCueLine = isUsersTurn ? currentLine.text : null;
 
-    const advanceLine = useCallback(() => {
-        cancelAudio();
-        setCurrentLineIndex(prev => {
-            if (prev + 1 >= script.length) {
-                return prev; // Don't advance past the end
-            }
-            return prev + 1;
-        });
-    }, [script.length, cancelAudio]);
-    
     const jumpToScene = useCallback((index: number) => {
         cancelAudio();
-        setCurrentLineIndex(index);
         setDisplayedAngieLine(null);
         setVideoState({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1 });
         setViewMode(ViewMode.TEXT); 
@@ -61,21 +58,19 @@ export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFil
 
     const onTypingComplete = useCallback(() => {
         setIsTyping(false);
-    }, []);
+        // If audio is also done (or not playing), signal completion.
+        if (!isAudioPlaying) {
+            onComputerLineCompleteRef.current();
+        }
+    }, [isAudioPlaying]);
     
     const onDialogueVideoEnd = useCallback(() => {
         setVideoState(prev => ({ ...prev, state: PrerecordedVideoState.IDLE }));
-        advanceLine();
-    }, [advanceLine]);
+        onComputerLineCompleteRef.current();
+    }, []);
 
     useEffect(() => {
-        if (wasComputerSpeakingRef.current && !isComputerSpeaking) {
-            advanceLine();
-        }
-        wasComputerSpeakingRef.current = isComputerSpeaking;
-    }, [isComputerSpeaking, advanceLine]);
-
-    useEffect(() => {
+        // This effect now triggers the line action when the index changes.
         const line = script[currentLineIndex];
         if (!line || status !== AppStatus.PERFORMING) return;
 
@@ -84,12 +79,23 @@ export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFil
                 if (line.character === COMPUTER_CHARACTER) {
                     angieLineCounterRef.current += 1;
                     const audioToPlay = audioFiles[angieLineCounterRef.current - 1];
-                    if (audioToPlay) {
-                        playAudio(audioToPlay.url);
-                    }
+                    
                     setIsTyping(true);
                     setDisplayedAngieLine(line.text);
+
+                    if (audioToPlay) {
+                        playAudio(audioToPlay.url, () => {
+                            // onEnd callback for audio
+                            if (!isTyping) { // If typing is already done
+                                onComputerLineCompleteRef.current();
+                            }
+                        });
+                    } else {
+                        // If there's no audio, typing alone determines completion.
+                        // onTypingComplete will handle calling the callback.
+                    }
                 } else {
+                    // User's turn
                     if (viewMode === ViewMode.PRERECORDED) {
                         setVideoState(prev => ({ state: PrerecordedVideoState.DIALOGUE, dialogueIndex: prev.dialogueIndex + 1 }));
                     }
@@ -101,19 +107,18 @@ export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFil
                     case CueType.CUT_TO_TEXT: setViewMode(ViewMode.TEXT); break;
                     case CueType.CUT_TO_PRERECORDED: setViewMode(ViewMode.PRERECORDED); break;
                 }
-                advanceLine();
+                // Cues and scene markers are instantaneous, so we advance immediately.
+                onComputerLineCompleteRef.current();
                 break;
             case LineType.SCENE_MARKER:
-                advanceLine();
+                onComputerLineCompleteRef.current();
                 break;
         }
 
         return () => {
-            if (isComputerSpeaking) {
-                cancelAudio();
-            }
+            cancelAudio();
         }
-    }, [currentLineIndex, script, advanceLine, viewMode, playAudio, cancelAudio, status, audioFiles, isComputerSpeaking]);
+    }, [currentLineIndex, script, status, audioFiles, viewMode, playAudio, cancelAudio, isTyping]);
 
     return {
         scenes,
@@ -122,7 +127,6 @@ export const usePerformanceManager = (script: ScriptLine[], audioFiles: AudioFil
         displayedAngieLine,
         userCueLine,
         isComputerSpeaking,
-        advanceLine,
         jumpToScene,
         onTypingComplete,
         onDialogueVideoEnd,
