@@ -20,7 +20,7 @@ const fuzzyMatch = (scriptLine: string, spokenText: string): boolean => {
     if (!normalizedScript) return false;
 
     const scriptWords = new Set(normalizedScript.split(' '));
-    const spokenWords = normalizedSpoken.split(' ');
+    const spokenWords = spokenText.split(' ');
     
     if (scriptWords.size === 0 || spokenWords.length === 0) return false;
 
@@ -149,8 +149,8 @@ const App: React.FC = () => {
             
             if (status === AppStatus.TITLE_SCREEN) {
                 setStatus(AppStatus.TRANSITION_SCREEN);
-                // Give time for transition screen to show
-                setTimeout(() => setStatus(AppStatus.PERFORMING), 3000);
+            } else if (status === AppStatus.TRANSITION_SCREEN) {
+                setStatus(AppStatus.PERFORMING);
             } else if (status === AppStatus.PERFORMING) {
                 // Allow spacebar to advance only on user's turn
                 if (userCueLine) {
@@ -249,7 +249,12 @@ const App: React.FC = () => {
 
         switch (status) {
             case AppStatus.TITLE_SCREEN:
-                return <div className="flex items-center justify-center h-screen"><h1 className="font-title text-9xl animate-pulse">ANTHROPOLOGY</h1></div>;
+                return (
+                    <div className="flex flex-col items-center justify-center h-screen">
+                        <h1 className="font-title text-9xl animate-pulse">ANTHROPOLOGY</h1>
+                        <p className="text-2xl text-teal-300 mt-4">By Lauren Gunderson</p>
+                    </div>
+                );
             case AppStatus.TRANSITION_SCREEN:
                 return <CodeTransitionScreen />;
             case AppStatus.PERFORMING:

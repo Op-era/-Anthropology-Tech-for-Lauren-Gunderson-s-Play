@@ -5,6 +5,11 @@ const codeLines = [
   'Auth Sequence [INITIATED]',
   'Loading personality matrix: ANGIE_v1.3...',
   '[OK]',
+  '// Acknowledging creators...',
+  '// Author: Lauren Gunderson',
+  '// Director: Allison Harrison',
+  '// Systems Engineer: Shane Foster',
+  ' ',
   'Parsing script nodes...',
   'Found 2 scenes, 54 dialogue lines.',
   'Establishing vocal synthesis link...',
@@ -36,7 +41,7 @@ export const CodeTransitionScreen: React.FC = () => {
     }, []);
 
     return (
-        <div className="w-screen h-screen bg-black p-8 font-mono text-green-400 text-lg overflow-hidden">
+        <div className="w-screen h-screen bg-black px-8 pt-20 pb-8 font-mono text-green-400 text-lg overflow-hidden">
             {visibleLines.map((line, index) => (
                 <p key={index} className={line === '>_' ? 'animate-pulse' : ''}>
                     {line}
