@@ -5,8 +5,9 @@ import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { usePerformanceManager } from './hooks/usePerformanceManager';
 import { parseScript } from './services/scriptParser';
 import * as storage from './services/storageService';
-import { AppStatus, ScriptLine, VideoFile, AudioFile } from './types';
+import { AppStatus, ScriptLine, VideoFile, AudioFile, ViewMode } from './types';
 import { CodeTransitionScreen } from './components/CodeTransitionScreen';
+import { ProcessingScreen } from './components/ProcessingScreen';
 
 const fuzzyMatch = (scriptLine: string, spokenText: string): boolean => {
     const normalizeText = (text: string) => text
@@ -58,13 +59,15 @@ const sortAudioByName = (files: File[]): File[] => {
 };
 
 const App: React.FC = () => {
-    const [status, setStatus] = useState<AppStatus>(AppStatus.TITLE_SCREEN);
+    const [status, setStatus] = useState<AppStatus>(AppStatus.LOADING);
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [script, setScript] = useState<ScriptLine[]>([]);
     const [videos, setVideos] = useState<VideoFile[]>([]);
     const [audioFiles, setAudioFiles] = useState<AudioFile[]>([]);
     const [scriptFile, setScriptFile] = useState<File | null>(null);
+    const [vdoNinjaUrl, setVdoNinjaUrl] = useState<string | null>(null);
     const [currentLineIndex, setCurrentLineIndex] = useState(0);
+    const audioContextRef = useRef<AudioContext | null>(null);
 
     const advanceLine = useCallback(() => {
         setCurrentLineIndex(prev => {
@@ -85,7 +88,8 @@ const App: React.FC = () => {
         jumpToScene,
         onTypingComplete,
         onDialogueVideoEnd,
-    } = usePerformanceManager(script, audioFiles, currentLineIndex, status, advanceLine);
+        currentLine,
+    } = usePerformanceManager(script, audioFiles, videos, currentLineIndex, status, advanceLine);
 
     const handleSpeechResult = useCallback((spokenText: string) => {
         if (userCueLine && fuzzyMatch(userCueLine, spokenText)) {
@@ -101,6 +105,7 @@ const App: React.FC = () => {
                 const scriptData = await storage.getScript();
                 const videoData = await storage.getVideos();
                 const audioData = await storage.getAudio();
+                const urlData = await storage.getVdoNinjaUrl();
 
                 if (scriptData) {
                     const storedScriptFile = new File([scriptData.text], scriptData.name);
@@ -115,8 +120,14 @@ const App: React.FC = () => {
                     const audioFileObjects = audioData.map(file => ({ file, url: URL.createObjectURL(file) }));
                     setAudioFiles(audioFileObjects);
                 }
+                if (urlData) {
+                    setVdoNinjaUrl(urlData);
+                }
             } catch (error) {
                 console.error("Failed to load data from storage:", error);
+            } finally {
+                // Only transition from LOADING. If user has already advanced, don't revert.
+                setStatus(currentStatus => currentStatus === AppStatus.LOADING ? AppStatus.TITLE_SCREEN : currentStatus);
             }
         };
 
@@ -142,25 +153,46 @@ const App: React.FC = () => {
             if (e.code !== 'Space') return;
             e.preventDefault();
 
+            // The very first user interaction (spacebar on title screen) will create and resume
+            // the audio context. This is a common workaround for browser autoplay policies.
+            if (!audioContextRef.current && status === AppStatus.TITLE_SCREEN) {
+                try {
+                    const context = new (window.AudioContext || (window as any).webkitAudioContext)();
+                    if (context.state === 'suspended') {
+                        context.resume();
+                    }
+                    audioContextRef.current = context;
+                } catch (err) {
+                    console.error("Could not initialize AudioContext for autoplay:", err);
+                }
+            }
+
             if (script.length === 0) {
                 if (!isMenuOpen) setIsMenuOpen(true);
                 return;
             }
             
-            if (status === AppStatus.TITLE_SCREEN) {
-                setStatus(AppStatus.TRANSITION_SCREEN);
-            } else if (status === AppStatus.TRANSITION_SCREEN) {
-                setStatus(AppStatus.PERFORMING);
-            } else if (status === AppStatus.PERFORMING) {
-                // Allow spacebar to advance only on user's turn
-                if (userCueLine) {
-                    advanceLine();
-                }
+            switch (status) {
+                case AppStatus.TITLE_SCREEN:
+                    setStatus(AppStatus.TRANSITION_SCREEN);
+                    break;
+                case AppStatus.TRANSITION_SCREEN:
+                    setStatus(AppStatus.PROCESSING_SCREEN);
+                    break;
+                case AppStatus.PROCESSING_SCREEN:
+                    setStatus(AppStatus.PERFORMING);
+                    break;
+                case AppStatus.PERFORMING:
+                    // Allow spacebar to advance as long as the computer isn't actively speaking.
+                    if (!isComputerSpeaking) {
+                        advanceLine();
+                    }
+                    break;
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [status, advanceLine, script.length, isMenuOpen, userCueLine]);
+    }, [status, advanceLine, script.length, isMenuOpen, isComputerSpeaking]);
 
     const handleJumpToScene = (index: number) => {
       jumpToScene(index);
@@ -209,6 +241,11 @@ const App: React.FC = () => {
         setStatus(AppStatus.TITLE_SCREEN);
     };
 
+    const handleSaveVdoNinjaUrl = async (url: string) => {
+        await storage.saveVdoNinjaUrl(url);
+        setVdoNinjaUrl(url);
+    };
+
     const handleClearData = async () => {
         await storage.clearAllData();
         window.location.reload();
@@ -248,15 +285,23 @@ const App: React.FC = () => {
         }
 
         switch (status) {
+            case AppStatus.LOADING:
+                return (
+                    <div className="flex items-center justify-center h-screen">
+                        <h1 className="font-title text-5xl animate-pulse">Loading...</h1>
+                    </div>
+                );
             case AppStatus.TITLE_SCREEN:
                 return (
                     <div className="flex flex-col items-center justify-center h-screen">
                         <h1 className="font-title text-9xl animate-pulse">ANTHROPOLOGY</h1>
-                        <p className="text-2xl text-teal-300 mt-4">By Lauren Gunderson</p>
+                        <p className="text-7xl text-teal-300 mt-4">By Lauren Gunderson</p>
                     </div>
                 );
             case AppStatus.TRANSITION_SCREEN:
                 return <CodeTransitionScreen />;
+            case AppStatus.PROCESSING_SCREEN:
+                return <ProcessingScreen />;
             case AppStatus.PERFORMING:
                 return (
                     <PerformanceView 
@@ -265,8 +310,10 @@ const App: React.FC = () => {
                         userTranscript={transcript}
                         videos={videos}
                         videoState={videoState}
+                        vdoNinjaUrl={vdoNinjaUrl}
                         onDialogueVideoEnd={onDialogueVideoEnd}
                         onTypingComplete={onTypingComplete}
+                        currentLine={currentLine}
                     />
                 );
             default:
@@ -287,9 +334,11 @@ const App: React.FC = () => {
                 scriptName={scriptFile?.name || null}
                 videoCount={videos.length}
                 audioCount={audioFiles.length}
+                vdoNinjaUrl={vdoNinjaUrl}
                 onNewScript={handleNewScript}
                 onNewVideos={handleNewVideos}
                 onNewAudio={handleNewAudio}
+                onSaveVdoNinjaUrl={handleSaveVdoNinjaUrl}
                 onClearData={handleClearData}
             />
             {renderContent()}

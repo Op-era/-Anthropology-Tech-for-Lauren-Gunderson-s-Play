@@ -1,8 +1,9 @@
 const DB_NAME = 'ThespianDigitalDB';
-const DB_VERSION = 2; // Bump version for schema change
+const DB_VERSION = 3; // Bump version for schema change
 const SCRIPT_STORE = 'scriptStore';
 const VIDEO_STORE = 'videoStore';
 const AUDIO_STORE = 'audioStore';
+const CONFIG_STORE = 'configStore';
 
 let db: IDBDatabase;
 
@@ -34,8 +35,33 @@ const openDB = (): Promise<IDBDatabase> => {
       if (!db.objectStoreNames.contains(AUDIO_STORE)) {
         db.createObjectStore(AUDIO_STORE, { keyPath: 'name' });
       }
+      if (!db.objectStoreNames.contains(CONFIG_STORE)) {
+        db.createObjectStore(CONFIG_STORE);
+      }
     };
   });
+};
+
+export const saveVdoNinjaUrl = async (url: string): Promise<void> => {
+    const db = await openDB();
+    const tx = db.transaction(CONFIG_STORE, 'readwrite');
+    const store = tx.objectStore(CONFIG_STORE);
+    store.put(url, 'vdoNinjaUrl');
+    return new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+};
+
+export const getVdoNinjaUrl = async (): Promise<string | null> => {
+    const db = await openDB();
+    const tx = db.transaction(CONFIG_STORE, 'readonly');
+    const store = tx.objectStore(CONFIG_STORE);
+    const request = store.get('vdoNinjaUrl');
+    return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error);
+    });
 };
 
 export const saveScript = async (name: string, text: string): Promise<void> => {
@@ -141,7 +167,7 @@ export const getAudio = async (): Promise<File[] | null> => {
 
 export const clearAllData = async (): Promise<void> => {
     const db = await openDB();
-    const storesToClear = [SCRIPT_STORE, VIDEO_STORE, AUDIO_STORE];
+    const storesToClear = [SCRIPT_STORE, VIDEO_STORE, AUDIO_STORE, CONFIG_STORE];
     const promises = storesToClear.map(storeName => 
         new Promise<void>((resolve, reject) => {
             const tx = db.transaction(storeName, 'readwrite');

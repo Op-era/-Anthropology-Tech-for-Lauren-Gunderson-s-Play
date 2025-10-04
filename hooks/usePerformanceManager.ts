@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ScriptLine, LineType, Scene, ViewMode, PrerecordedVideoState, CueType, AppStatus, AudioFile } from '../types';
+import { ScriptLine, LineType, Scene, ViewMode, PrerecordedVideoState, CueType, AppStatus, AudioFile, VideoFile } from '../types';
 import { COMPUTER_CHARACTER } from '../services/scriptParser';
 import { useAudioPlayer } from './useAudioPlayer';
 
 export const usePerformanceManager = (
     script: ScriptLine[], 
-    audioFiles: AudioFile[], 
+    audioFiles: AudioFile[],
+    videos: VideoFile[],
     currentLineIndex: number,
     status: AppStatus,
     onComputerLineComplete: () => void,
@@ -26,7 +27,8 @@ export const usePerformanceManager = (
         onComputerLineCompleteRef.current = onComputerLineComplete;
     }, [onComputerLineComplete]);
 
-    const isComputerSpeaking = isTyping || isAudioPlaying;
+    const isAngiesDialoguePlaying = viewMode === ViewMode.PRERECORDED && videoState.state === PrerecordedVideoState.DIALOGUE;
+    const isComputerSpeaking = isTyping || isAudioPlaying || isAngiesDialoguePlaying;
 
     const scenes = useMemo(() => script.reduce((acc, line, index) => {
         if (line.type === LineType.SCENE_MARKER) {
@@ -44,7 +46,7 @@ export const usePerformanceManager = (
         setDisplayedAngieLine(null);
         setVideoState({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1 });
         setViewMode(ViewMode.TEXT); 
-
+        
         // Recalculate angie line count up to this scene
         let angieLinesBefore = 0;
         for(let i = 0; i < index; i++) {
@@ -77,27 +79,45 @@ export const usePerformanceManager = (
         switch (line.type) {
             case LineType.DIALOGUE:
                 if (line.character === COMPUTER_CHARACTER) {
-                    angieLineCounterRef.current += 1;
-                    const audioToPlay = audioFiles[angieLineCounterRef.current - 1];
-                    
-                    setIsTyping(true);
-                    setDisplayedAngieLine(line.text);
+                    const trimmedText = line.text.trim();
+                    const isShortParenthetical = trimmedText.startsWith('(') && trimmedText.endsWith(')') && trimmedText.length < 25;
 
-                    if (audioToPlay) {
-                        playAudio(audioToPlay.url, () => {
-                            // onEnd callback for audio
-                            if (!isTyping) { // If typing is already done
-                                onComputerLineCompleteRef.current();
-                            }
-                        });
-                    } else {
-                        // If there's no audio, typing alone determines completion.
-                        // onTypingComplete will handle calling the callback.
+                    if (!trimmedText || isShortParenthetical) {
+                        break; 
                     }
-                } else {
-                    // User's turn
+
+                    angieLineCounterRef.current += 1;
+                    
                     if (viewMode === ViewMode.PRERECORDED) {
-                        setVideoState(prev => ({ state: PrerecordedVideoState.DIALOGUE, dialogueIndex: prev.dialogueIndex + 1 }));
+                        const nextDialogueIndex = videoState.dialogueIndex + 1;
+                        const dialogueVideoExists = videos[nextDialogueIndex + 1];
+                        if (dialogueVideoExists) {
+                            setVideoState({ state: PrerecordedVideoState.DIALOGUE, dialogueIndex: nextDialogueIndex });
+                        } else {
+                            onComputerLineCompleteRef.current();
+                        }
+                    } else if (viewMode === ViewMode.TEXT) {
+                        const audioToPlay = audioFiles[angieLineCounterRef.current - 1];
+                        
+                        setIsTyping(true);
+                        setDisplayedAngieLine(line.text);
+
+                        if (audioToPlay) {
+                            playAudio(audioToPlay.url, () => {
+                                if (!isTyping) {
+                                    onComputerLineCompleteRef.current();
+                                }
+                            });
+                        }
+                    } else if (viewMode === ViewMode.LIVE_VIDEO) {
+                        const audioToPlay = audioFiles[angieLineCounterRef.current - 1];
+                        if (audioToPlay) {
+                            playAudio(audioToPlay.url, () => {
+                                onComputerLineCompleteRef.current();
+                            });
+                        } else {
+                            onComputerLineCompleteRef.current();
+                        }
                     }
                 }
                 break;
@@ -105,20 +125,41 @@ export const usePerformanceManager = (
                 switch(line.cue) {
                     case CueType.CUT_TO_LIVE_CAMERA: setViewMode(ViewMode.LIVE_VIDEO); break;
                     case CueType.CUT_TO_TEXT: setViewMode(ViewMode.TEXT); break;
-                    case CueType.CUT_TO_PRERECORDED: setViewMode(ViewMode.PRERECORDED); break;
+                    case CueType.CUT_TO_PRERECORDED:
+                        setViewMode(ViewMode.PRERECORDED);
+                        setVideoState({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1 });
+                        break;
+                    case CueType.PLAY_VOICEMAIL:
+                        if (line.audioIndex !== undefined) {
+                            const audioToPlay = audioFiles[line.audioIndex];
+                            if (audioToPlay) {
+                                playAudio(audioToPlay.url, () => {
+                                    onComputerLineCompleteRef.current();
+                                });
+                            } else {
+                                console.warn(`Voicemail cue for audio index ${line.audioIndex} but audio file not found.`);
+                                onComputerLineCompleteRef.current(); // still advance
+                            }
+                        } else {
+                             onComputerLineCompleteRef.current(); // Advance if no index provided
+                        }
+                        break;
+                    // AI Code cues are now no-ops
+                    case CueType.SHOW_AI_CODE:
+                    case CueType.HIDE_AI_CODE: 
+                    case CueType.TRIGGER_ERROR: 
+                    case CueType.NO_ERROR: 
+                        break;
                 }
-                // Cues and scene markers are instantaneous, so we advance immediately.
-                onComputerLineCompleteRef.current();
                 break;
             case LineType.SCENE_MARKER:
-                onComputerLineCompleteRef.current();
                 break;
         }
 
         return () => {
             cancelAudio();
         }
-    }, [currentLineIndex, script, status, audioFiles, viewMode, playAudio, cancelAudio, isTyping]);
+    }, [currentLineIndex, script, status, audioFiles, videos, viewMode, playAudio, cancelAudio, videoState.dialogueIndex]);
 
     return {
         scenes,
@@ -130,5 +171,6 @@ export const usePerformanceManager = (
         jumpToScene,
         onTypingComplete,
         onDialogueVideoEnd,
+        currentLine,
     };
 };

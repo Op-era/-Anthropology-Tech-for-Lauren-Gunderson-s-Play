@@ -2,18 +2,40 @@ import { ScriptLine, LineType, DialogueLine, CueLine, CueType, SceneMarkerLine }
 
 const COMPUTER_CHARACTER = 'ANGIE';
 
-const parseCue = (text: string): CueType => {
+const parseCue = (text: string): { cue: CueType; audioIndex?: number } => {
   const cleanText = text.toLowerCase().trim();
   if (cleanText.includes('cut to camera') || cleanText.includes('cut to live') || cleanText.includes('cut to live feed')) {
-    return CueType.CUT_TO_LIVE_CAMERA;
+    return { cue: CueType.CUT_TO_LIVE_CAMERA };
   }
   if (cleanText.includes('cut to text')) {
-    return CueType.CUT_TO_TEXT;
+    return { cue: CueType.CUT_TO_TEXT };
   }
   if (cleanText.includes('cut to prerecorded') || cleanText.includes('cut to video')) {
-    return CueType.CUT_TO_PRERECORDED;
+    return { cue: CueType.CUT_TO_PRERECORDED };
   }
-  return CueType.UNKNOWN;
+  if (cleanText.includes('show ai code')) {
+    return { cue: CueType.SHOW_AI_CODE };
+  }
+  if (cleanText.includes('hide ai code')) {
+    return { cue: CueType.HIDE_AI_CODE };
+  }
+  if (cleanText.includes('no error')) {
+    return { cue: CueType.NO_ERROR };
+  }
+  if (cleanText.includes('error')) {
+    return { cue: CueType.TRIGGER_ERROR };
+  }
+  if (cleanText.startsWith('(voicemail:')) {
+    const match = cleanText.match(/\(voicemail:\s*(\d+)\)/);
+    if (match && match[1]) {
+        // The script will use 1-based indexing for human readability.
+        const audioIndex = parseInt(match[1], 10) - 1;
+        if (audioIndex >= 0) {
+            return { cue: CueType.PLAY_VOICEMAIL, audioIndex };
+        }
+    }
+  }
+  return { cue: CueType.UNKNOWN };
 };
 
 export const parseScript = (scriptText: string): ScriptLine[] => {
@@ -57,13 +79,17 @@ export const parseScript = (scriptText: string): ScriptLine[] => {
     }
 
     // 3. Check for Cues
-    const cueType = parseCue(trimmedLine);
-    if (cueType !== CueType.UNKNOWN) {
-        parsedScript.push({
+    const parsedCue = parseCue(trimmedLine);
+    if (parsedCue.cue !== CueType.UNKNOWN) {
+        const cueLine: CueLine = {
             type: LineType.CUE,
-            cue: cueType,
+            cue: parsedCue.cue,
             originalText: trimmedLine,
-        });
+        };
+        if (parsedCue.audioIndex !== undefined) {
+            cueLine.audioIndex = parsedCue.audioIndex;
+        }
+        parsedScript.push(cueLine);
         lastCharacter = null; // Cues reset the speaker
         continue;
     }
