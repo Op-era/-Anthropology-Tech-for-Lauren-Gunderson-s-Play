@@ -12,13 +12,19 @@ export interface DialogueLine {
 
 export enum CueType {
   CUT_TO_LIVE_CAMERA = 'CUT_TO_LIVE_CAMERA',
+  END_LIVE_FEED = 'END_LIVE_FEED',
   CUT_TO_TEXT = 'CUT_TO_TEXT',
   CUT_TO_PRERECORDED = 'CUT_TO_PRERECORDED',
+  PLAY_SPECIFIC_VIDEO = 'PLAY_SPECIFIC_VIDEO',
   SHOW_AI_CODE = 'SHOW_AI_CODE',
   HIDE_AI_CODE = 'HIDE_AI_CODE',
   TRIGGER_ERROR = 'TRIGGER_ERROR',
   NO_ERROR = 'NO_ERROR',
   PLAY_VOICEMAIL = 'PLAY_VOICEMAIL',
+  RED_SCREEN = 'RED_SCREEN',
+  FLASHING_SCREEN = 'FLASHING_SCREEN',
+  NORMAL_SCREEN = 'NORMAL_SCREEN',
+  BLACKOUT = 'BLACKOUT',
   UNKNOWN = 'UNKNOWN',
 }
 
@@ -27,6 +33,7 @@ export interface CueLine {
   cue: CueType;
   originalText: string;
   audioIndex?: number;
+  videoFilename?: string;
 }
 
 export interface SceneMarkerLine {
@@ -68,5 +75,6 @@ export interface AudioFile {
 
 export enum PrerecordedVideoState {
     IDLE,
-    DIALOGUE
+    DIALOGUE,
+    SPECIFIC,
 }

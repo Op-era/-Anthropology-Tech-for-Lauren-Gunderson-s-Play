@@ -42,6 +42,50 @@ const openDB = (): Promise<IDBDatabase> => {
   });
 };
 
+export const saveLiveVideoConfig = async (config: { source: 'local' | 'vdoninja', localCameraId: string | null }): Promise<void> => {
+    const db = await openDB();
+    const tx = db.transaction(CONFIG_STORE, 'readwrite');
+    const store = tx.objectStore(CONFIG_STORE);
+    store.put(config, 'liveVideoConfig');
+    return new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+};
+
+export const getLiveVideoConfig = async (): Promise<{ source: 'local' | 'vdoninja', localCameraId: string | null } | null> => {
+    const db = await openDB();
+    const tx = db.transaction(CONFIG_STORE, 'readonly');
+    const store = tx.objectStore(CONFIG_STORE);
+    const request = store.get('liveVideoConfig');
+    return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error);
+    });
+};
+
+export const saveTypingSpeed = async (speed: number): Promise<void> => {
+    const db = await openDB();
+    const tx = db.transaction(CONFIG_STORE, 'readwrite');
+    const store = tx.objectStore(CONFIG_STORE);
+    store.put(speed, 'typingSpeed');
+    return new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+};
+
+export const getTypingSpeed = async (): Promise<number | null> => {
+    const db = await openDB();
+    const tx = db.transaction(CONFIG_STORE, 'readonly');
+    const store = tx.objectStore(CONFIG_STORE);
+    const request = store.get('typingSpeed');
+    return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result === undefined ? null : request.result);
+        request.onerror = () => reject(request.error);
+    });
+};
+
 export const saveVdoNinjaUrl = async (url: string): Promise<void> => {
     const db = await openDB();
     const tx = db.transaction(CONFIG_STORE, 'readwrite');

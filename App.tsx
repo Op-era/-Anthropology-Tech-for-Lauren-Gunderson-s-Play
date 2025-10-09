@@ -1,39 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { PerformanceView } from './components/PerformanceView';
 import { SceneMenu } from './components/SceneMenu';
-import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { usePerformanceManager } from './hooks/usePerformanceManager';
-import { parseScript } from './services/scriptParser';
+import { parseScript, COMPUTER_CHARACTER } from './services/scriptParser';
 import * as storage from './services/storageService';
-import { AppStatus, ScriptLine, VideoFile, AudioFile, ViewMode } from './types';
+import { AppStatus, ScriptLine, VideoFile, AudioFile, ViewMode, LineType, PrerecordedVideoState } from './types';
 import { CodeTransitionScreen } from './components/CodeTransitionScreen';
 import { ProcessingScreen } from './components/ProcessingScreen';
-
-const fuzzyMatch = (scriptLine: string, spokenText: string): boolean => {
-    const normalizeText = (text: string) => text
-        .toLowerCase()
-        .replace(/[^\w\s']|_/g, "") // Keep apostrophes
-        .replace(/\s+/g, " ")
-        .trim();
-
-    const normalizedScript = normalizeText(scriptLine);
-    const normalizedSpoken = normalizeText(spokenText);
-    if (!normalizedScript) return false;
-
-    const scriptWords = new Set(normalizedScript.split(' '));
-    const spokenWords = spokenText.split(' ');
-    
-    if (scriptWords.size === 0 || spokenWords.length === 0) return false;
-
-    let matchCount = 0;
-    for (const word of spokenWords) {
-        if (scriptWords.has(word)) {
-            matchCount++;
-        }
-    }
-    const matchPercentage = matchCount / scriptWords.size;
-    return matchPercentage >= 0.6;
-};
 
 const sortVideosByName = (files: File[]): File[] => {
     const idleVideoIndex = files.findIndex(f => f.name.toLowerCase().startsWith('idle'));
@@ -66,38 +39,135 @@ const App: React.FC = () => {
     const [audioFiles, setAudioFiles] = useState<AudioFile[]>([]);
     const [scriptFile, setScriptFile] = useState<File | null>(null);
     const [vdoNinjaUrl, setVdoNinjaUrl] = useState<string | null>(null);
+    const [typingSpeed, setTypingSpeed] = useState(1.0);
     const [currentLineIndex, setCurrentLineIndex] = useState(0);
     const audioContextRef = useRef<AudioContext | null>(null);
-
-    const advanceLine = useCallback(() => {
-        setCurrentLineIndex(prev => {
-            if (prev + 1 >= script.length) {
-                return prev;
-            }
-            return prev + 1;
-        });
-    }, [script.length]);
+    
+    // Centralized stream management state
+    const [liveVideoSource, setLiveVideoSource] = useState<'local' | 'vdoninja'>('vdoninja');
+    const [localCameraId, setLocalCameraId] = useState<string | null>(null);
+    const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
 
     const {
         scenes,
         viewMode,
         videoState,
         displayedAngieLine,
-        userCueLine,
         isComputerSpeaking,
+        borderEffect,
+        isLiveFeedActive,
         jumpToScene,
         onTypingComplete,
         onDialogueVideoEnd,
+        onSpecificVideoEnd,
+        shouldAdvance,
+        resetAdvance,
         currentLine,
-    } = usePerformanceManager(script, audioFiles, videos, currentLineIndex, status, advanceLine);
+    } = usePerformanceManager(script, audioFiles, videos, currentLineIndex, status);
 
-    const handleSpeechResult = useCallback((spokenText: string) => {
-        if (userCueLine && fuzzyMatch(userCueLine, spokenText)) {
-            advanceLine();
+    // State ref for event listener to prevent stale closures
+    const stateRef = useRef({
+        status,
+        isMenuOpen,
+        script,
+        isComputerSpeaking,
+        viewMode,
+        videoState,
+        setIsMenuOpen, // Include setter to handle Escape key
+    });
+
+    useEffect(() => {
+        stateRef.current = {
+            status,
+            isMenuOpen,
+            script,
+            isComputerSpeaking,
+            viewMode,
+            videoState,
+            setIsMenuOpen,
+        };
+    }, [status, isMenuOpen, script, isComputerSpeaking, viewMode, videoState]);
+    
+    // Effect to manage the camera stream lifecycle centrally
+    useEffect(() => {
+        if (!isLiveFeedActive || liveVideoSource !== 'local' || !localCameraId) {
+            if (activeStream) {
+                activeStream.getTracks().forEach(track => track.stop());
+                setActiveStream(null);
+            }
+            return;
         }
-    }, [userCueLine, advanceLine]);
 
-    const { transcript, start: startListening, stop: stopListening, clearTranscript, permissionStatus } = useSpeechRecognition({ onResult: handleSpeechResult });
+        let isCancelled = false;
+        
+        const startStream = async () => {
+            try {
+                const newStream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: localCameraId } } });
+                
+                if (!isCancelled) {
+                    if (activeStream) {
+                        activeStream.getTracks().forEach(track => track.stop());
+                    }
+                    setActiveStream(newStream);
+                } else {
+                    newStream.getTracks().forEach(track => track.stop());
+                }
+            } catch (err) {
+                console.error("Failed to get camera stream in App:", err);
+                if (!isCancelled) {
+                    setActiveStream(null);
+                }
+            }
+        };
+
+        startStream();
+
+        return () => {
+            isCancelled = true;
+            if (activeStream) {
+                activeStream.getTracks().forEach(track => track.stop());
+            }
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isLiveFeedActive, liveVideoSource, localCameraId]);
+
+    const advanceLine = useCallback(() => {
+        setCurrentLineIndex(prev => {
+            const currentScript = stateRef.current.script;
+            for (let i = prev + 1; i < currentScript.length; i++) {
+                const line = currentScript[i];
+                if (line.type === LineType.CUE || (line.type === LineType.DIALOGUE && line.character === COMPUTER_CHARACTER)) {
+                    return i;
+                }
+            }
+            return prev;
+        });
+    }, []);
+    
+    const regressLine = useCallback(() => {
+        setCurrentLineIndex(prev => {
+            const currentScript = stateRef.current.script;
+            for (let i = prev - 1; i >= 0; i--) {
+                const line = currentScript[i];
+                if (line.type === LineType.CUE || (line.type === LineType.DIALOGUE && line.character === COMPUTER_CHARACTER)) {
+                    return i;
+                }
+            }
+            return prev;
+        });
+    }, []);
+    
+    const callbackRef = useRef({ onSpecificVideoEnd, advanceLine, regressLine });
+    useEffect(() => {
+        callbackRef.current = { onSpecificVideoEnd, advanceLine, regressLine };
+    }, [onSpecificVideoEnd, advanceLine, regressLine]);
+
+    useEffect(() => {
+        if (shouldAdvance) {
+            advanceLine();
+            resetAdvance();
+        }
+    }, [shouldAdvance, advanceLine, resetAdvance]);
     
     useEffect(() => {
         const loadStoredData = async () => {
@@ -106,6 +176,8 @@ const App: React.FC = () => {
                 const videoData = await storage.getVideos();
                 const audioData = await storage.getAudio();
                 const urlData = await storage.getVdoNinjaUrl();
+                const speedData = await storage.getTypingSpeed();
+                const liveConfig = await storage.getLiveVideoConfig();
 
                 if (scriptData) {
                     const storedScriptFile = new File([scriptData.text], scriptData.name);
@@ -123,76 +195,101 @@ const App: React.FC = () => {
                 if (urlData) {
                     setVdoNinjaUrl(urlData);
                 }
+                if (speedData !== null) {
+                    setTypingSpeed(speedData);
+                }
+                if (liveConfig) {
+                    setLiveVideoSource(liveConfig.source);
+                    setLocalCameraId(liveConfig.localCameraId);
+                }
             } catch (error) {
                 console.error("Failed to load data from storage:", error);
             } finally {
-                // Only transition from LOADING. If user has already advanced, don't revert.
-                setStatus(currentStatus => currentStatus === AppStatus.LOADING ? AppStatus.TITLE_SCREEN : currentStatus);
+                setStatus(AppStatus.TITLE_SCREEN);
             }
         };
 
         loadStoredData();
     }, []);
-
-    // Main effect to control listening state based on the performance state.
-    useEffect(() => {
-        const isPerforming = status === AppStatus.PERFORMING;
-        const shouldBeListening = isPerforming && !!userCueLine && !isComputerSpeaking;
-
-        if (shouldBeListening && permissionStatus === 'granted') {
-            clearTranscript();
-            startListening();
-        } else {
-            stopListening();
-        }
-    }, [status, userCueLine, isComputerSpeaking, permissionStatus, startListening, stopListening, clearTranscript]);
     
-    // Effect for handling keyboard controls.
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.code !== 'Space') return;
-            e.preventDefault();
+            const { status, script, isMenuOpen, setIsMenuOpen } = stateRef.current;
+            const { onSpecificVideoEnd, advanceLine, regressLine } = callbackRef.current;
 
-            // The very first user interaction (spacebar on title screen) will create and resume
-            // the audio context. This is a common workaround for browser autoplay policies.
-            if (!audioContextRef.current && status === AppStatus.TITLE_SCREEN) {
-                try {
-                    const context = new (window.AudioContext || (window as any).webkitAudioContext)();
-                    if (context.state === 'suspended') {
-                        context.resume();
-                    }
-                    audioContextRef.current = context;
-                } catch (err) {
-                    console.error("Could not initialize AudioContext for autoplay:", err);
-                }
+            const activeElement = document.activeElement;
+            if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA' || activeElement.tagName === 'SELECT')) {
+                if (e.key !== 'Escape') return;
             }
 
-            if (script.length === 0) {
-                if (!isMenuOpen) setIsMenuOpen(true);
+            if (isMenuOpen) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setIsMenuOpen(false);
+                }
                 return;
             }
             
-            switch (status) {
-                case AppStatus.TITLE_SCREEN:
-                    setStatus(AppStatus.TRANSITION_SCREEN);
-                    break;
-                case AppStatus.TRANSITION_SCREEN:
-                    setStatus(AppStatus.PROCESSING_SCREEN);
-                    break;
-                case AppStatus.PROCESSING_SCREEN:
-                    setStatus(AppStatus.PERFORMING);
-                    break;
-                case AppStatus.PERFORMING:
-                    // Allow spacebar to advance as long as the computer isn't actively speaking.
-                    if (!isComputerSpeaking) {
-                        advanceLine();
+            if (e.code === 'Space' && (status !== AppStatus.PERFORMING)) {
+                 if (script.length === 0) {
+                    setIsMenuOpen(true);
+                    return;
+                }
+                
+                e.preventDefault();
+                 if (!audioContextRef.current && status === AppStatus.TITLE_SCREEN) {
+                    try {
+                        const context = new (window.AudioContext || (window as any).webkitAudioContext)();
+                        if (context.state === 'suspended') {
+                            context.resume();
+                        }
+                        audioContextRef.current = context;
+                    } catch (err) {
+                        console.error("Could not initialize AudioContext for autoplay:", err);
                     }
-                    break;
+                }
+                
+                switch (status) {
+                    case AppStatus.TITLE_SCREEN: setStatus(AppStatus.TRANSITION_SCREEN); break;
+                    case AppStatus.TRANSITION_SCREEN: setStatus(AppStatus.PROCESSING_SCREEN); break;
+                    case AppStatus.PROCESSING_SCREEN: setStatus(AppStatus.PERFORMING); break;
+                }
+                return;
+            }
+
+            if (status === AppStatus.PERFORMING) {
+                const { viewMode, videoState, isComputerSpeaking } = stateRef.current;
+                const isSpecificVideoPlaying = viewMode === ViewMode.PRERECORDED && videoState.state === PrerecordedVideoState.SPECIFIC;
+                
+                let actionTaken = false;
+
+                if (e.code === 'ArrowRight' || e.code === 'Space') {
+                    if (isSpecificVideoPlaying) {
+                        onSpecificVideoEnd();
+                        actionTaken = true;
+                    } else if (!isComputerSpeaking) {
+                        advanceLine();
+                        actionTaken = true;
+                    }
+                } 
+                else if (e.code === 'ArrowLeft') {
+                    if (!isComputerSpeaking) {
+                        regressLine();
+                        actionTaken = true;
+                    }
+                }
+                
+                // This is the critical change: only stop the event if we actually did something.
+                if (actionTaken) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
             }
         };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [status, advanceLine, script.length, isMenuOpen, isComputerSpeaking]);
+        
+        window.addEventListener('keydown', handleKeyDown, true);
+        return () => window.removeEventListener('keydown', handleKeyDown, true);
+    }, []);
 
     const handleJumpToScene = (index: number) => {
       jumpToScene(index);
@@ -246,103 +343,117 @@ const App: React.FC = () => {
         setVdoNinjaUrl(url);
     };
 
-    const handleClearData = async () => {
-        await storage.clearAllData();
-        window.location.reload();
+    const handleSaveTypingSpeed = async (speed: number) => {
+        await storage.saveTypingSpeed(speed);
+        setTypingSpeed(speed);
+    };
+
+    const handleSaveLiveVideoSource = async (source: 'local' | 'vdoninja') => {
+        await storage.saveLiveVideoConfig({ source, localCameraId });
+        setLiveVideoSource(source);
+    };
+
+    const handleSaveLocalCameraId = async (id: string | null) => {
+        await storage.saveLiveVideoConfig({ source: liveVideoSource, localCameraId: id });
+        setLocalCameraId(id);
     };
     
-    const handleGrantPermission = () => {
-        // This direct user action is required by the browser to show the prompt.
-        // The speech recognition hook handles the underlying API calls.
-        startListening();
+    const handleClearData = async () => {
+        await storage.clearAllData();
+        // Reset state
+        setScript([]);
+        setScriptFile(null);
+        setVideos([]);
+        setAudioFiles([]);
+        setVdoNinjaUrl(null);
+        setTypingSpeed(1.0);
+        setCurrentLineIndex(0);
+        setLiveVideoSource('vdoninja');
+        setLocalCameraId(null);
+        setIsMenuOpen(false);
+        window.location.reload(); // Easiest way to ensure a clean state
     };
-
+    
     const renderContent = () => {
-        if (status === AppStatus.PERFORMING && permissionStatus === 'prompt') {
-            return (
-                <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center text-center z-50 p-8">
-                    <h2 className="font-title text-5xl text-teal-400 mb-4">Enable Your Microphone</h2>
-                    <p className="text-2xl max-w-3xl mb-8">This application needs permission to listen for your lines.</p>
-                    <button
-                        onClick={handleGrantPermission}
-                        className="font-title text-3xl bg-teal-500 hover:bg-teal-400 text-black px-8 py-4 rounded-lg transition-colors focus:outline-none focus:ring-4 focus:ring-teal-300"
-                    >
-                        Activate Microphone
-                    </button>
-                    <p className="text-xl max-w-3xl mt-6 text-gray-400">Your browser will ask you to confirm. Please click "Allow".</p>
-                </div>
-            );
-        }
-
-        if (status === AppStatus.PERFORMING && permissionStatus === 'denied') {
-            return (
-                 <div className="absolute inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center text-center z-50 p-8">
-                    <h2 className="font-title text-5xl text-red-500 mb-4">Microphone Access Denied</h2>
-                    <p className="text-2xl max-w-3xl">This application requires access to your microphone to listen for your lines.</p>
-                    <p className="text-xl max-w-3xl mt-4 text-gray-400">To fix this, please go to your browser's site settings for this page, enable microphone permissions, and then reload.</p>
-                </div>
-            )
-        }
-
         switch (status) {
             case AppStatus.LOADING:
-                return (
-                    <div className="flex items-center justify-center h-screen">
-                        <h1 className="font-title text-5xl animate-pulse">Loading...</h1>
-                    </div>
-                );
+                return <div className="flex items-center justify-center h-screen"><p className="font-title text-3xl">Loading...</p></div>;
+            
             case AppStatus.TITLE_SCREEN:
                 return (
-                    <div className="flex flex-col items-center justify-center h-screen">
-                        <h1 className="font-title text-9xl animate-pulse">ANTHROPOLOGY</h1>
-                        <p className="text-7xl text-teal-300 mt-4">By Lauren Gunderson</p>
+                    // =================================================================
+                    // == LOCKED COMPONENT
+                    // == DO NOT MODIFY THIS TITLE SCREEN OR THE STARTUP FLOW.
+                    // == THE FLOW IS: TITLE -> (SPACE) -> TRANSITION -> (SPACE) -> PROCESSING -> (SPACE) -> PERFORMING
+                    // == NO OTHER SCREENS SHOULD BE ADDED.
+                    // =================================================================
+                    <div className="flex flex-col items-center justify-center h-screen text-center p-8">
+                        <button onClick={() => setIsMenuOpen(true)} className="absolute top-4 left-4 text-4xl p-2 z-20 hover:text-teal-400 transition-colors" aria-label="Open Menu">☰</button>
+                        <h1 className="font-title text-9xl text-white">ANTHROPOLOGY</h1>
+                        <p className="mt-4 text-7xl text-teal-400">
+                            By Lauren Gunderson
+                        </p>
                     </div>
                 );
+
             case AppStatus.TRANSITION_SCREEN:
                 return <CodeTransitionScreen />;
+
             case AppStatus.PROCESSING_SCREEN:
                 return <ProcessingScreen />;
+            
             case AppStatus.PERFORMING:
                 return (
-                    <PerformanceView 
-                        mode={viewMode}
-                        angieLine={displayedAngieLine}
-                        userTranscript={transcript}
-                        videos={videos}
-                        videoState={videoState}
-                        vdoNinjaUrl={vdoNinjaUrl}
-                        onDialogueVideoEnd={onDialogueVideoEnd}
-                        onTypingComplete={onTypingComplete}
-                        currentLine={currentLine}
-                    />
+                    <>
+                        <button onClick={() => setIsMenuOpen(true)} className="absolute top-4 left-4 text-4xl p-2 z-20 hover:text-teal-400 transition-colors" aria-label="Open Menu">☰</button>
+                        <PerformanceView
+                            mode={viewMode}
+                            angieLine={displayedAngieLine}
+                            videos={videos}
+                            videoState={videoState}
+                            vdoNinjaUrl={vdoNinjaUrl}
+                            onDialogueVideoEnd={onDialogueVideoEnd}
+                            onSpecificVideoEnd={onSpecificVideoEnd}
+                            onTypingComplete={onTypingComplete}
+                            borderEffect={borderEffect}
+                            currentLine={currentLine}
+                            typingSpeed={typingSpeed}
+                            liveVideoSource={liveVideoSource}
+                            activeStream={activeStream}
+                        />
+                    </>
                 );
+            
             default:
-                return <div className="flex items-center justify-center h-screen"><p className="text-red-500">An unexpected error occurred.</p></div>;
+                return <div>Unknown App Status</div>;
         }
     };
 
     return (
-        <div className="w-screen h-screen bg-black">
-            <button onClick={() => setIsMenuOpen(true)} className="absolute top-4 left-4 z-40 text-white text-3xl p-2 rounded-full bg-black/30 hover:bg-black/60 transition-colors" aria-label="Open menu">
-                ☰
-            </button>
-            <SceneMenu 
+        <>
+            {renderContent()}
+            <SceneMenu
                 isOpen={isMenuOpen}
                 onClose={() => setIsMenuOpen(false)}
                 scenes={scenes}
                 onSelectScene={handleJumpToScene}
-                scriptName={scriptFile?.name || null}
+                scriptName={scriptFile?.name ?? null}
                 videoCount={videos.length}
                 audioCount={audioFiles.length}
                 vdoNinjaUrl={vdoNinjaUrl}
+                typingSpeed={typingSpeed}
+                liveVideoSource={liveVideoSource}
+                localCameraId={localCameraId}
                 onNewScript={handleNewScript}
                 onNewVideos={handleNewVideos}
                 onNewAudio={handleNewAudio}
                 onSaveVdoNinjaUrl={handleSaveVdoNinjaUrl}
+                onSaveTypingSpeed={handleSaveTypingSpeed}
+                onSaveLiveVideoSource={handleSaveLiveVideoSource}
+                onSaveLocalCameraId={handleSaveLocalCameraId}
                 onClearData={handleClearData}
             />
-            {renderContent()}
-        </div>
+        </>
     );
 };
 

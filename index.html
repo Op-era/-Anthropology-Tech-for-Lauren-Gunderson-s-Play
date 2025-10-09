@@ -15,8 +15,22 @@
       }
       .font-title {
         font-family: 'Audiowide', cursive;
-        /* Add a subtle text shadow for a more "glowy" futuristic look */
-        text-shadow: 0 0 5px #14b8a6, 0 0 10px #14b8a6;
+        text-shadow: 0 0 5px #14b8a6, 0 0 10px #14b8a6; /* teal-500 */
+        animation: pulsate-glow 4s ease-in-out infinite;
+      }
+      @keyframes pulsate-glow {
+        50% {
+          text-shadow: 0 0 7px #ef4444, 0 0 15px #ef4444; /* red-500 */
+        }
+      }
+      @keyframes border-flash {
+        50% {
+          border-color: transparent;
+        }
+      }
+      .animate-border-flash {
+        border-color: #ef4444; /* Tailwind red-500 */
+        animation: border-flash 0.5s step-end infinite;
       }
     </style>
   <script type="importmap">

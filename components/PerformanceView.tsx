@@ -4,19 +4,24 @@ import { ViewMode, PrerecordedVideoState, VideoFile, ScriptLine, LineType } from
 interface PerformanceViewProps {
   mode: ViewMode;
   angieLine: string | null;
-  userTranscript: string;
   videos: VideoFile[];
   videoState: {
       state: PrerecordedVideoState;
       dialogueIndex: number;
+      specificVideoUrl: string | null;
   };
   vdoNinjaUrl: string | null;
   onDialogueVideoEnd: () => void;
+  onSpecificVideoEnd: () => void;
   onTypingComplete: () => void;
+  borderEffect: 'NORMAL' | 'RED' | 'FLASHING';
   currentLine: ScriptLine | undefined;
+  typingSpeed: number;
+  liveVideoSource: 'local' | 'vdoninja';
+  activeStream: MediaStream | null; // Changed from localCameraId to activeStream
 }
 
-const TextView: React.FC<{ angieLine: string | null, onComplete: () => void }> = ({ angieLine, onComplete }) => {
+const TextView: React.FC<{ angieLine: string | null, onComplete: () => void, typingSpeed: number }> = ({ angieLine, onComplete, typingSpeed }) => {
     const [displayedText, setDisplayedText] = useState('');
     const timeoutIdRef = useRef<number | undefined>(undefined);
 
@@ -25,6 +30,7 @@ const TextView: React.FC<{ angieLine: string | null, onComplete: () => void }> =
         setDisplayedText('');
 
         if (angieLine === null) {
+            onComplete(); // Ensure completion is called even if there's no line to type
             return;
         }
 
@@ -40,9 +46,10 @@ const TextView: React.FC<{ angieLine: string | null, onComplete: () => void }> =
             setDisplayedText(prev => prev + char);
             charIndex += 1;
 
-            let delay = 35; // standard typing speed
-            if (char === ',') delay = 200;
-            else if (['.', '?', '!'].includes(char)) delay = 350;
+            const safeSpeed = Math.max(0.1, typingSpeed); // Prevent division by zero or negative values
+            let delay = 35 / safeSpeed; // standard typing speed
+            if (char === ',') delay = 200 / safeSpeed;
+            else if (['.', '?', '!'].includes(char)) delay = 350 / safeSpeed;
             
             timeoutIdRef.current = window.setTimeout(type, delay);
         };
@@ -52,7 +59,7 @@ const TextView: React.FC<{ angieLine: string | null, onComplete: () => void }> =
         return () => {
             window.clearTimeout(timeoutIdRef.current);
         };
-    }, [angieLine, onComplete]);
+    }, [angieLine, onComplete, typingSpeed]);
 
     if (!angieLine) {
         return null; // Don't render anything if there's no line
@@ -69,8 +76,13 @@ const TextView: React.FC<{ angieLine: string | null, onComplete: () => void }> =
     );
 };
 
-
-const LiveVideoView: React.FC<{ vdoNinjaUrl: string | null }> = ({ vdoNinjaUrl }) => {
+const LiveVideoView: React.FC<{
+  vdoNinjaUrl: string | null;
+  activeStream: MediaStream | null; // Changed from localCameraId
+  source: 'local' | 'vdoninja';
+}> = ({ vdoNinjaUrl, activeStream, source }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    
     const augmentedUrl = useMemo(() => {
         if (!vdoNinjaUrl) return null;
         try {
@@ -83,65 +95,108 @@ const LiveVideoView: React.FC<{ vdoNinjaUrl: string | null }> = ({ vdoNinjaUrl }
             return vdoNinjaUrl;
         }
     }, [vdoNinjaUrl]);
-    
-    if (!vdoNinjaUrl) {
+
+    // Effect to attach the centrally managed stream to the video element
+    useEffect(() => {
+        const videoElement = videoRef.current;
+        if (source === 'local' && videoElement) {
+            if (activeStream) {
+                if (videoElement.srcObject !== activeStream) {
+                    videoElement.srcObject = activeStream;
+                    videoElement.play().catch(e => console.error("Error playing main video stream:", e));
+                }
+            } else {
+                videoElement.srcObject = null;
+            }
+        }
+    }, [source, activeStream]);
+
+    if (source === 'vdoninja') {
+        if (!vdoNinjaUrl) {
+            return (
+                <div className="flex flex-col items-center justify-center h-full w-full p-12 text-center">
+                     <h2 className="font-title text-5xl text-yellow-500 mb-4">VDO.Ninja Not Configured</h2>
+                     <p className="text-2xl max-w-3xl text-gray-300">Please open the menu (☰) and add a VDO.Ninja URL to display the live camera feed.</p>
+                </div>
+            );
+        }
+        
         return (
-            <div className="flex flex-col items-center justify-center h-full w-full p-12 text-center">
-                 <h2 className="font-title text-5xl text-yellow-500 mb-4">VDO.Ninja Not Configured</h2>
-                 <p className="text-2xl max-w-3xl text-gray-300">Please open the menu (☰) and add a VDO.Ninja URL to display the live camera feed.</p>
-            </div>
+            <iframe
+                key={augmentedUrl}
+                src={augmentedUrl!}
+                allow="camera; microphone; autoplay; fullscreen; display-capture"
+                className="w-full h-full border-0"
+                title="VDO.Ninja Live Feed"
+            ></iframe>
         );
     }
-    
+
+    if (source === 'local') {
+        if (!activeStream) {
+             return (
+                <div className="flex flex-col items-center justify-center h-full w-full p-12 text-center">
+                    <h2 className="font-title text-5xl text-yellow-500 mb-4">Local Camera Not Available</h2>
+                    <p className="text-2xl max-w-3xl text-gray-300">The selected camera could not be accessed. Please check permissions or select another camera in the menu (☰).</p>
+                </div>
+            );
+        }
+        return <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />;
+    }
+
+    // Fallback if no source is selected or valid
     return (
-        <iframe
-            key={augmentedUrl}
-            src={augmentedUrl!}
-            allow="camera; microphone; autoplay; fullscreen; display-capture"
-            className="w-full h-full border-0"
-            title="VDO.Ninja Live Feed"
-        ></iframe>
+        <div className="flex flex-col items-center justify-center h-full w-full p-12 text-center">
+             <h2 className="font-title text-5xl text-yellow-500 mb-4">No Video Source</h2>
+             <p className="text-2xl max-w-3xl text-gray-300">Please open the menu (☰) to configure a live video source.</p>
+        </div>
     );
 };
 
 interface PrerecordedVideoViewProps {
   videos: VideoFile[];
-  state: PrerecordedVideoState;
-  dialogueIndex: number;
+  videoState: PerformanceViewProps['videoState'];
   onDialogueVideoEnd: () => void;
-  currentLine: ScriptLine | undefined;
+  onSpecificVideoEnd: () => void;
 }
 
-const PrerecordedVideoView: React.FC<PrerecordedVideoViewProps> = ({ videos, state, dialogueIndex, onDialogueVideoEnd, currentLine }) => {
+const PrerecordedVideoView: React.FC<PrerecordedVideoViewProps> = ({ videos, videoState, onDialogueVideoEnd, onSpecificVideoEnd }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [currentSrc, setCurrentSrc] = useState<string>('');
-    const idleVideo = videos[0]?.url;
-    const dialogueVideo = videos[dialogueIndex + 1]?.url;
+    const [isLooping, setIsLooping] = useState(false);
     
-    const isCueLineActive = currentLine?.type === LineType.CUE;
+    const idleVideoUrl = useMemo(() => videos.find(v => v.file.name.toLowerCase().startsWith('idle'))?.url, [videos]);
+    const dialogueVideoUrl = videos.find(v => v.file.name.startsWith(String(videoState.dialogueIndex + 1)))?.url;
     
     useEffect(() => {
-        if (isCueLineActive) {
-            setCurrentSrc(''); // Ensure nothing plays during a cue
-            return;
+        let newSrc = '';
+        switch (videoState.state) {
+            case PrerecordedVideoState.SPECIFIC:
+                newSrc = videoState.specificVideoUrl || '';
+                break;
+            case PrerecordedVideoState.DIALOGUE:
+                // Fallback to idle if a specific dialogue video is missing
+                newSrc = dialogueVideoUrl || idleVideoUrl || '';
+                break;
+            case PrerecordedVideoState.IDLE:
+            default:
+                newSrc = idleVideoUrl || '';
+                break;
         }
-
-        if(state === PrerecordedVideoState.IDLE && idleVideo) {
-            setCurrentSrc(idleVideo);
-        } else if (state === PrerecordedVideoState.DIALOGUE && dialogueVideo) {
-            setCurrentSrc(dialogueVideo);
-        } else {
-            setCurrentSrc('');
-        }
-    }, [state, idleVideo, dialogueVideo, isCueLineActive]);
+        setCurrentSrc(newSrc);
+        // A video should loop only if its source is the idle video.
+        setIsLooping(!!newSrc && newSrc === idleVideoUrl);
+    }, [videoState, idleVideoUrl, dialogueVideoUrl]);
 
     useEffect(() => {
         const videoElement = videoRef.current;
         if (!videoElement) return;
 
         const handleVideoEnd = () => {
-            if (state === PrerecordedVideoState.DIALOGUE) {
+            if (videoState.state === PrerecordedVideoState.DIALOGUE) {
                 onDialogueVideoEnd();
+            } else if (videoState.state === PrerecordedVideoState.SPECIFIC) {
+                onSpecificVideoEnd();
             }
         };
 
@@ -149,54 +204,59 @@ const PrerecordedVideoView: React.FC<PrerecordedVideoViewProps> = ({ videos, sta
         return () => {
             videoElement.removeEventListener('ended', handleVideoEnd);
         };
-    }, [state, onDialogueVideoEnd]);
+    }, [videoState.state, onDialogueVideoEnd, onSpecificVideoEnd]);
 
-    if (isCueLineActive) {
-        return null; // The background is black, so this will show a black screen.
+    if (!currentSrc) {
+        return (
+             <div className="flex flex-col items-center justify-center h-full w-full p-12 text-center">
+                 <h2 className="font-title text-5xl text-yellow-500 mb-4">Video Not Found</h2>
+                 <p className="text-2xl max-w-3xl text-gray-300">A required video could not be loaded. Please check the video files in the menu (☰).</p>
+            </div>
+        )
     }
 
-    return <video ref={videoRef} key={currentSrc} src={currentSrc} autoPlay playsInline loop={state === PrerecordedVideoState.IDLE} className="w-full h-full object-cover" />;
+    return <video ref={videoRef} key={currentSrc} src={currentSrc} autoPlay playsInline loop={isLooping} className="w-full h-full object-cover" />;
 };
 
 export const PerformanceView: React.FC<PerformanceViewProps> = (props) => {
-  const { mode, angieLine, userTranscript, videos, videoState, vdoNinjaUrl, onDialogueVideoEnd, onTypingComplete, currentLine } = props;
+  const { mode, angieLine, videos, videoState, vdoNinjaUrl, onDialogueVideoEnd, onSpecificVideoEnd, onTypingComplete, borderEffect, currentLine, typingSpeed, liveVideoSource, activeStream } = props;
 
-  const isVideoMode = mode === ViewMode.LIVE_VIDEO || mode === ViewMode.PRERECORDED;
+  const borderClass = useMemo(() => {
+    switch (borderEffect) {
+        case 'RED':
+            return 'border-4 border-solid border-red-500';
+        case 'FLASHING':
+            return 'border-4 border-solid animate-border-flash';
+        case 'NORMAL':
+        default:
+            return 'border-4 border-solid border-teal-500 hover:border-teal-400';
+    }
+  }, [borderEffect]);
 
   return (
     <div className="relative w-screen h-screen bg-black overflow-hidden">
-      {/* 
-        This outer div is the interactive frame. A click on this element (the padding)
-        will regain focus. A click in the center goes to the content (iframe/video).
-        The video/iframe itself is also clickable.
-      */}
       <div 
-        className={`absolute inset-0 transition-colors duration-200 p-1 ${isVideoMode ? 'border-4 border-solid border-teal-500 hover:border-teal-400' : 'border-0 border-transparent'}`}
+        className={`absolute inset-0 transition-colors duration-200 p-4 ${borderClass}`}
         onClick={() => window.focus()}
         aria-label="Regain keyboard control"
       >
         <div className="w-full h-full bg-black">
-          {mode === ViewMode.TEXT && <TextView key={angieLine} angieLine={angieLine} onComplete={onTypingComplete} />}
+          {mode === ViewMode.TEXT && (
+              <TextView key={angieLine} angieLine={angieLine} onComplete={onTypingComplete} typingSpeed={typingSpeed} />
+          )}
           
-          {mode === ViewMode.LIVE_VIDEO && <LiveVideoView vdoNinjaUrl={vdoNinjaUrl} />}
+          {mode === ViewMode.LIVE_VIDEO && <LiveVideoView vdoNinjaUrl={vdoNinjaUrl} source={liveVideoSource} activeStream={activeStream} />}
 
           {mode === ViewMode.PRERECORDED && (
               <PrerecordedVideoView 
                   videos={videos} 
-                  state={videoState.state}
-                  dialogueIndex={videoState.dialogueIndex}
+                  videoState={videoState}
                   onDialogueVideoEnd={onDialogueVideoEnd}
-                  currentLine={currentLine}
+                  onSpecificVideoEnd={onSpecificVideoEnd}
               />
           )}
         </div>
       </div>
-      
-      {userTranscript && (
-        <div className="absolute bottom-0 left-0 right-0 p-4 bg-black bg-opacity-50 pointer-events-none">
-          <p className="text-center text-3xl text-pink-500">{userTranscript}</p>
-        </div>
-      )}
     </div>
   );
 };
