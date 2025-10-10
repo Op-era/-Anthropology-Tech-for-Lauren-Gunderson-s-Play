@@ -1,223 +1,209 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ScriptLine, LineType, Scene, ViewMode, PrerecordedVideoState, CueType, AppStatus, AudioFile, VideoFile } from '../types';
-import { COMPUTER_CHARACTER } from '../services/scriptParser';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  ScriptLine,
+  LineType,
+  CueType,
+  DialogueLine,
+  CueLine,
+  ViewMode,
+  VideoFile,
+  AudioFile,
+  PrerecordedVideoState,
+  Scene,
+} from '../types';
+import { useTextToSpeech } from './useTextToSpeech';
 import { useAudioPlayer } from './useAudioPlayer';
+import { COMPUTER_CHARACTER } from '../services/scriptParser';
 
-export const usePerformanceManager = (
-    script: ScriptLine[], 
-    audioFiles: AudioFile[],
-    videos: VideoFile[],
-    currentLineIndex: number,
-    status: AppStatus
-) => {
-    const [isTyping, setIsTyping] = useState(false);
-    const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.TEXT);
-    const [borderEffect, setBorderEffect] = useState<'NORMAL' | 'RED' | 'FLASHING'>('NORMAL');
-    const [isLiveFeedActive, setIsLiveFeedActive] = useState(false);
-    const [videoState, setVideoState] = useState({
-        state: PrerecordedVideoState.IDLE,
-        dialogueIndex: -1,
-        specificVideoUrl: null as string | null,
-    });
-    const [displayedAngieLine, setDisplayedAngieLine] = useState<string | null>(null);
-    const [shouldAdvance, setShouldAdvance] = useState(false);
+interface PerformanceManagerOptions {
+  script: ScriptLine[];
+  videos: VideoFile[];
+  audioFiles: AudioFile[];
+  currentLineIndex: number;
+  onAdvance: () => void;
+  scenes: Scene[];
+}
 
-    const { play: playAudio, cancel: cancelAudio, isPlaying: isAudioPlaying } = useAudioPlayer();
+export const usePerformanceManager = ({
+  script,
+  videos,
+  audioFiles,
+  currentLineIndex,
+  onAdvance,
+  scenes,
+}: PerformanceManagerOptions) => {
+  const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.TEXT);
+  const [videoState, setVideoState] = useState<{
+    state: PrerecordedVideoState;
+    dialogueIndex: number;
+    specificVideoUrl: string | null;
+  }>({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1, specificVideoUrl: null });
+  
+  const [displayedAngieLine, setDisplayedAngieLine] = useState<DialogueLine | null>(null);
+  const [isTyping, setIsTyping] = useState(false);
+  const [isLiveFeedActive, setIsLiveFeedActive] = useState(false);
+  const [isAutoAdvancing, setIsAutoAdvancing] = useState(false);
+  const [shouldAdvance, setShouldAdvance] = useState(false);
 
-    const currentLine = script[currentLineIndex];
+  const { speak, cancel: cancelSpeech, isSpeaking } = useTextToSpeech();
+  const { play: playAudio, cancel: cancelAudio, isPlaying: isAudioPlaying } = useAudioPlayer();
 
-    const isSpecificVideoPlaying = viewMode === ViewMode.PRERECORDED && videoState.state === PrerecordedVideoState.SPECIFIC;
-    const isAngiesDialoguePlaying = viewMode === ViewMode.PRERECORDED && videoState.state === PrerecordedVideoState.DIALOGUE;
-    const isComputerSpeaking = isTyping || isAudioPlaying || isAngiesDialoguePlaying || isSpecificVideoPlaying;
+  const dialogueVideos = useMemo(() => videos.filter(v => !v.file.name.toLowerCase().startsWith('idle')), [videos]);
+  const idleVideoUrl = useMemo(() => videos.find(v => v.file.name.toLowerCase().startsWith('idle'))?.url || null, [videos]);
 
-    const scenes = useMemo(() => script.reduce((acc, line, index) => {
-        if (line.type === LineType.SCENE_MARKER) {
-            acc.push({ name: line.sceneName, index });
-        }
-        return acc;
-    }, [] as Scene[]), [script]);
+  const onAdvanceRef = useRef(onAdvance);
+  useEffect(() => {
+    onAdvanceRef.current = onAdvance;
+  }, [onAdvance]);
 
-    const angieDialogueIndex = useMemo(() => {
-        if (currentLine?.type !== LineType.DIALOGUE || currentLine.character !== COMPUTER_CHARACTER) {
-            return -1;
-        }
-        let count = -1;
-        for (let i = 0; i <= currentLineIndex; i++) {
-            const line = script[i];
-            if (line.type === LineType.DIALOGUE && line.character === COMPUTER_CHARACTER) {
-                const trimmedText = line.text.trim();
-                const isShortParenthetical = trimmedText.startsWith('(') && trimmedText.endsWith(')') && trimmedText.length < 25;
-                if (!trimmedText || isShortParenthetical) {
-                    continue;
-                }
+  const onTypingComplete = useCallback(() => {
+    setIsTyping(false);
+  }, []);
+
+  const onDialogueVideoEnd = useCallback(() => {
+    setVideoState({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1, specificVideoUrl: null });
+  }, []);
+
+  const angieDialogueIndex = useMemo(() => {
+    if (!script || !scenes) return -1;
+    
+    const currentScene = scenes.slice().reverse().find(s => s.index <= currentLineIndex);
+    const sceneStartIndex = currentScene ? currentScene.index : 0;
+
+    let count = -1;
+    for (let i = sceneStartIndex; i <= currentLineIndex; i++) {
+        const line = script[i];
+        if (line && line.type === LineType.DIALOGUE && line.character === COMPUTER_CHARACTER) {
+            const trimmedText = line.text.trim();
+            const isShortParenthetical = trimmedText.startsWith('(') && trimmedText.endsWith(')') && trimmedText.length < 25;
+            if (trimmedText && !isShortParenthetical) {
                 count++;
             }
         }
-        return count;
-    }, [currentLine, currentLineIndex, script]);
+    }
+    return count;
+  }, [currentLineIndex, script, scenes]);
 
-    const jumpToScene = useCallback((index: number) => {
-        cancelAudio();
+  const isSpecificVideoPlaying = videoState.state === PrerecordedVideoState.SPECIFIC;
+  const isAngiesDialoguePlaying = viewMode === ViewMode.PRERECORDED && videoState.state === PrerecordedVideoState.DIALOGUE;
+  const isComputerSpeaking = isTyping || isAudioPlaying || isAngiesDialoguePlaying || isSpecificVideoPlaying;
+
+  useEffect(() => {
+    const line = script[currentLineIndex];
+    if (!line) return;
+
+    // High-priority auto-skip for live feed
+    if (isAutoAdvancing) {
+        if (line.type === LineType.CUE && line.cue === CueType.END_LIVE_FEED) {
+            setIsLiveFeedActive(false);
+            setDisplayedAngieLine(null);
+            setViewMode(ViewMode.TEXT);
+            setIsAutoAdvancing(false);
+        } else {
+             setShouldAdvance(true);
+        }
+        return;
+    }
+
+    setIsTyping(false);
+
+    switch (line.type) {
+      case LineType.DIALOGUE:
+        if (line.character === COMPUTER_CHARACTER) {
+          const trimmedText = line.text.trim();
+          const isShortParenthetical = trimmedText.startsWith('(') && trimmedText.endsWith(')') && trimmedText.length < 25;
+
+          if (!trimmedText || isShortParenthetical) {
+            setDisplayedAngieLine(null);
+            setShouldAdvance(true);
+            break;
+          }
+
+          if (viewMode === ViewMode.PRERECORDED) {
+            setDisplayedAngieLine(null);
+            const videoToPlay = dialogueVideos[angieDialogueIndex];
+            if (videoToPlay) {
+              setVideoState({ state: PrerecordedVideoState.DIALOGUE, dialogueIndex: angieDialogueIndex, specificVideoUrl: null });
+            } else {
+              setVideoState({ state: PrerecordedVideoState.MISSING, dialogueIndex: angieDialogueIndex, specificVideoUrl: null });
+            }
+          } else { // TEXT or LIVE_VIDEO
+            setIsTyping(true);
+            setDisplayedAngieLine(line);
+            const audioToPlay = audioFiles[angieDialogueIndex];
+            if (audioToPlay) {
+              playAudio(audioToPlay.url, () => setIsTyping(false));
+            }
+          }
+        } else {
+          cancelAudio();
+          setDisplayedAngieLine(null);
+          // This is a user line, so we wait for the user to advance.
+        }
+        break;
+      
+      case LineType.CUE:
         setDisplayedAngieLine(null);
-        setVideoState({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1, specificVideoUrl: null });
-        setBorderEffect('NORMAL');
-        setViewMode(ViewMode.TEXT);
-        setIsLiveFeedActive(false);
-    }, [cancelAudio]);
-
-    const onTypingComplete = useCallback(() => {
-        setIsTyping(false);
-    }, []);
-    
-    const onDialogueVideoEnd = useCallback(() => {
-        setVideoState(prev => ({ ...prev, state: PrerecordedVideoState.IDLE }));
-    }, []);
-
-    const onSpecificVideoEnd = useCallback(() => {
-        setVideoState({
-            state: PrerecordedVideoState.IDLE,
-            dialogueIndex: -1,
-            specificVideoUrl: null,
-        });
+        switch (line.cue) {
+          case CueType.CUT_TO_LIVE_CAMERA:
+            setViewMode(ViewMode.LIVE_VIDEO);
+            setIsLiveFeedActive(true);
+            setIsAutoAdvancing(true);
+            setShouldAdvance(true);
+            break;
+          case CueType.CUT_TO_TEXT:
+            setViewMode(ViewMode.TEXT);
+            setShouldAdvance(true);
+            break;
+          case CueType.CUT_TO_PRERECORDED:
+            setViewMode(ViewMode.PRERECORDED);
+            setShouldAdvance(true);
+            break;
+          case CueType.PLAY_SPECIFIC_VIDEO:
+            const videoToPlay = videos.find(v => v.file.name.toLowerCase() === line.videoFilename?.toLowerCase());
+            if (videoToPlay) {
+              setViewMode(ViewMode.PRERECORDED);
+              setVideoState({ state: PrerecordedVideoState.SPECIFIC, dialogueIndex: -1, specificVideoUrl: videoToPlay.url });
+            } else {
+              setViewMode(ViewMode.PRERECORDED);
+              setVideoState({ state: PrerecordedVideoState.MISSING, dialogueIndex: -1, specificVideoUrl: null });
+            }
+            break;
+          default:
+            setShouldAdvance(true);
+            break;
+        }
+        break;
+      
+      case LineType.SCENE_MARKER:
+        setDisplayedAngieLine(null);
         setShouldAdvance(true);
-    }, []);
+        break;
+    }
 
-    const resetAdvance = useCallback(() => {
-        setShouldAdvance(false);
-    }, []);
-
-    useEffect(() => {
-        const line = script[currentLineIndex];
-        if (!line || status !== AppStatus.PERFORMING) return;
-
-        // --- Core State Machine Logic ---
-        
-        // Reset typing status for every new line.
-        setIsTyping(false);
-
-        switch (line.type) {
-            case LineType.DIALOGUE:
-                if (line.character === COMPUTER_CHARACTER) {
-                    const trimmedText = line.text.trim();
-                    const isShortParenthetical = trimmedText.startsWith('(') && trimmedText.endsWith(')') && trimmedText.length < 25;
-
-                    if (!trimmedText || isShortParenthetical) {
-                        setDisplayedAngieLine(null);
-                        break; 
-                    }
-                    
-                    if (viewMode === ViewMode.PRERECORDED) {
-                        setDisplayedAngieLine(null);
-                        const dialogueVideoExists = videos[angieDialogueIndex + 1];
-                        if (dialogueVideoExists) {
-                            setVideoState({ state: PrerecordedVideoState.DIALOGUE, dialogueIndex: angieDialogueIndex, specificVideoUrl: null });
-                        }
-                    } else if (viewMode === ViewMode.TEXT) {
-                        const audioToPlay = audioFiles[angieDialogueIndex];
-                        
-                        setIsTyping(true);
-                        setDisplayedAngieLine(line.text);
-
-                        if (audioToPlay) {
-                            playAudio(audioToPlay.url);
-                        }
-                    } else if (viewMode === ViewMode.LIVE_VIDEO) {
-                        // When live, ANGIE's lines can be audio-only.
-                        setDisplayedAngieLine(null);
-                        const audioToPlay = audioFiles[angieDialogueIndex];
-                        if (audioToPlay) {
-                            playAudio(audioToPlay.url);
-                        }
-                    }
-                } else {
-                    // This logic is now redundant due to smart navigation in App.tsx, but is safe to keep.
-                    cancelAudio();
-                    setDisplayedAngieLine(null);
-                }
-                break;
-            case LineType.CUE:
-                // Handle all cues here
-                switch(line.cue) {
-                    case CueType.CUT_TO_LIVE_CAMERA:
-                        setViewMode(ViewMode.LIVE_VIDEO);
-                        setIsLiveFeedActive(true);
-                        setDisplayedAngieLine(null);
-                        cancelAudio();
-                        break;
-                    case CueType.END_LIVE_FEED:
-                        setIsLiveFeedActive(false);
-                        setViewMode(ViewMode.TEXT);
-                        break;
-                    case CueType.CUT_TO_TEXT:
-                        setViewMode(ViewMode.TEXT);
-                        setIsLiveFeedActive(false);
-                        break;
-                    case CueType.CUT_TO_PRERECORDED:
-                        setViewMode(ViewMode.PRERECORDED);
-                        setVideoState({ state: PrerecordedVideoState.IDLE, dialogueIndex: -1, specificVideoUrl: null });
-                        setIsLiveFeedActive(false);
-                        break;
-                    case CueType.PLAY_SPECIFIC_VIDEO:
-                        if (line.videoFilename) {
-                            const videoToPlay = videos.find(v => v.file.name.trim().toLowerCase() === line.videoFilename?.trim().toLowerCase());
-                            if (videoToPlay) {
-                                setViewMode(ViewMode.PRERECORDED);
-                                setVideoState({ state: PrerecordedVideoState.SPECIFIC, dialogueIndex: -1, specificVideoUrl: videoToPlay.url });
-                                setDisplayedAngieLine(null);
-                                cancelAudio();
-                            } else {
-                                console.warn(`Video file not found for cue: ${line.originalText}`);
-                            }
-                        }
-                        break;
-                    case CueType.PLAY_VOICEMAIL:
-                        if (line.audioIndex !== undefined) {
-                            const audioToPlay = audioFiles[line.audioIndex];
-                            if (audioToPlay) {
-                                playAudio(audioToPlay.url);
-                            } else {
-                                console.warn(`Voicemail cue for audio index ${line.audioIndex} but audio file not found.`);
-                            }
-                        }
-                        break;
-                    case CueType.BLACKOUT:
-                        setDisplayedAngieLine(null);
-                        break;
-                    case CueType.RED_SCREEN: setBorderEffect('RED'); break;
-                    case CueType.FLASHING_SCREEN: setBorderEffect('FLASHING'); break;
-                    case CueType.NORMAL_SCREEN: setBorderEffect('NORMAL'); break;
-                    // Other cues like SHOW_AI_CODE are handled elsewhere or are no-ops here.
-                    case CueType.SHOW_AI_CODE:
-                    case CueType.HIDE_AI_CODE: 
-                    case CueType.TRIGGER_ERROR: 
-                    case CueType.NO_ERROR: 
-                        break;
-                }
-                break;
-            case LineType.SCENE_MARKER:
-                setDisplayedAngieLine(null);
-                break;
-        }
-
-        return () => {
-            cancelAudio();
-        }
-    }, [currentLineIndex, script, status, audioFiles, videos, viewMode, playAudio, cancelAudio, angieDialogueIndex]);
-
-    return {
-        scenes,
-        viewMode,
-        videoState,
-        displayedAngieLine,
-        isComputerSpeaking,
-        borderEffect,
-        isLiveFeedActive,
-        jumpToScene,
-        onTypingComplete,
-        onDialogueVideoEnd,
-        onSpecificVideoEnd,
-        shouldAdvance,
-        resetAdvance,
-        currentLine,
+    return () => {
+      cancelAudio();
     };
+  }, [currentLineIndex, script, videos, audioFiles, dialogueVideos, viewMode, playAudio, cancelAudio, scenes, isAutoAdvancing]);
+
+  useEffect(() => {
+    if (shouldAdvance) {
+      onAdvanceRef.current();
+      setShouldAdvance(false);
+    }
+  }, [shouldAdvance]);
+  
+  return {
+    viewMode,
+    videoState,
+    isComputerSpeaking,
+    isLiveFeedActive,
+    isAutoAdvancing,
+    angieLine: displayedAngieLine,
+    onTypingComplete,
+    onDialogueVideoEnd,
+    idleVideoUrl,
+    dialogueVideos,
+    angieDialogueIndex
+  };
 };

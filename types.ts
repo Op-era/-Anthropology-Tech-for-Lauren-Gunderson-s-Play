@@ -1,3 +1,4 @@
+// Fix: Removed self-import of 'LineType' which was causing a declaration conflict.
 export enum LineType {
   DIALOGUE = 'DIALOGUE',
   CUE = 'CUE',
@@ -77,4 +78,6 @@ export enum PrerecordedVideoState {
     IDLE,
     DIALOGUE,
     SPECIFIC,
+    MISSING,
+    LIVE,
 }

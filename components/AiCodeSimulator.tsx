@@ -12,7 +12,8 @@ export const AiCodeSimulator: React.FC<AiCodeSimulatorProps> = ({ errorLevel }) 
   const [displayedCode, setDisplayedCode] = useState('');
   const codeIndexRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
-  const animationFrameIdRef = useRef<number>();
+  // FIX: Explicitly initialize useRef with `undefined`. The no-argument version can cause a "Expected 1 arguments, but got 0" error with some TypeScript configurations.
+  const animationFrameIdRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const animateTyping = () => {
